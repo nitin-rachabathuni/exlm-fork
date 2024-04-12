@@ -146,18 +146,21 @@ const expLevel = [
 }));
 
 export const roleOptions = {
+  id: 'el_role',
   name: placeholders.filterRoleLabel || 'Role',
   items: roles,
   selected: 0,
 };
 
 export const contentTypeOptions = {
+  id: 'el_contenttype',
   name: placeholders.filterContentTypeLabel || 'Content Type',
   items: contentType,
   selected: 0,
 };
 
 export const expTypeOptions = {
+  id: 'el_level',
   name: placeholders.filterExperienceLevelLabel || 'Experience Level',
   items: expLevel,
   selected: 0,
@@ -172,6 +175,10 @@ const FILTER_RESULTS_COUNT = {
 // Function to get an object by name
 export function getObjectByName(obj, name) {
   return obj.find((option) => option.name === name);
+}
+
+export function getObjectById(obj, ID) {
+  return obj.find((option) => option.id === ID);
 }
 
 export const getFiltersPaginationText = (pgCount) => `of ${pgCount} page${pgCount > 1 ? 's' : ''}`;
@@ -226,10 +233,13 @@ export const getParsedSolutionsQuery = (solutionTags) => {
   const query = parsedSolutionsInfo
     .map(({ product, version }) => `(@el_product="${product}"${version ? ` AND @el_version="${version}"` : ''})`)
     .join(' OR ');
+  const [parsedSolutionInfo = {}] = parsedSolutionsInfo;
+  const { product: productKey = '' } = parsedSolutionInfo;
 
   return {
     query: parsedSolutionsInfo.length > 1 ? `(${query})` : query,
     products: solutionInfo.map(({ product }) => product.toLowerCase()),
+    productKey,
   };
 };
 
@@ -251,4 +261,63 @@ export const getCoveoFacets = (type, value) => {
     });
     return acc;
   }, []);
+};
+
+export function hideSearchSuggestions(e) {
+  const browseFilterSearchSection = document.querySelector('.browse-filters-search');
+  const searchInputEl = browseFilterSearchSection.querySelector('input.search-input');
+  const searchSuggestionsPopoverEl = browseFilterSearchSection.querySelector('.search-suggestions-popover');
+  let hideSuggestions = false;
+  if (e.key === 'Escape') {
+    hideSuggestions = true;
+    e.stopPropagation();
+  } else if (!e.key) {
+    hideSuggestions = e.target && !searchInputEl.contains(e.target) && !searchSuggestionsPopoverEl.contains(e.target);
+  }
+  if (hideSuggestions) {
+    searchInputEl.classList.remove('suggestion-interactive');
+    // eslint-disable-next-line no-use-before-define
+    toggleSearchSuggestionsVisibility(false);
+  }
+}
+
+export function toggleSearchSuggestionsVisibility(show) {
+  const searchSuggestionsPopoverEl = document.querySelector('.browse-filters-search .search-suggestions-popover');
+  if (!searchSuggestionsPopoverEl) {
+    return;
+  }
+  if (show) {
+    searchSuggestionsPopoverEl.classList.add('search-suggestions-popover-visible');
+    document.addEventListener('keydown', hideSearchSuggestions);
+    document.addEventListener('click', hideSearchSuggestions);
+  } else {
+    searchSuggestionsPopoverEl.classList.remove('search-suggestions-popover-visible');
+    document.removeEventListener('keydown', hideSearchSuggestions);
+    document.removeEventListener('click', hideSearchSuggestions);
+  }
+}
+
+export function showSearchSuggestionsOnInputClick() {
+  const searchBlock = document.querySelector('.browse-filters-search');
+  const searchSuggestionsPopoverEl = searchBlock?.querySelector('.search-suggestions-popover');
+  if (
+    !searchSuggestionsPopoverEl ||
+    searchSuggestionsPopoverEl.classList.contains('search-suggestions-popover-visible')
+  ) {
+    return;
+  }
+  const searchInputEl = searchBlock?.querySelector('.search-input');
+  if (searchInputEl) {
+    searchInputEl.classList.add('suggestion-interactive');
+  }
+  toggleSearchSuggestionsVisibility(true);
+}
+
+export const handleCoverSearchSubmit = (targetSearchText) => {
+  const [currentSearchString] = window.location.hash.match(/\bq=([^&#]*)/) || [];
+  if (currentSearchString) {
+    window.location.hash = window.location.hash.replace(currentSearchString, `q=${targetSearchText || ''}`);
+  } else {
+    window.location.hash = `#q=${targetSearchText || ''}&${window.location.hash.slice(1)}`;
+  }
 };

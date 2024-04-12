@@ -23,6 +23,9 @@ const DEFAULT_OPTIONS = Object.freeze({
   PRODUCT: 'Product',
 });
 
+const defaultRoleLabel = placeholders?.featuredCardRoleLabel || DEFAULT_OPTIONS.ROLE;
+const defaultProductLabel = placeholders?.featuredCardProductLabel || DEFAULT_OPTIONS.PRODUCT;
+
 // Helper function thats returns a list of all Featured Card Products //
 async function getFeaturedCardSolutions() {
   const ffetch = (await ffetchModulePromise).default;
@@ -44,6 +47,28 @@ const handleSolutionsService = async () => {
     return solutions;
   }
 
+  return [];
+};
+
+/* Function to update the browser's URL with the selected filter using query parameters */
+const updateURLWithSelectedFilters = (filterType, filterValue) => {
+  const currentURL = new URL(window.location);
+  if (filterValue === DEFAULT_OPTIONS.ROLE || filterValue === DEFAULT_OPTIONS.PRODUCT) {
+    currentURL.searchParams.delete(filterType);
+  } else {
+    currentURL.searchParams.set(filterType, encodeURIComponent(filterValue));
+  }
+  window.history.pushState({}, '', currentURL.toString());
+};
+
+/* Function to update the Query Parameters */
+const updateParamValues = (filterValue) => {
+  const currentURL = new URL(window.location);
+  const queryParams = Object.fromEntries(currentURL.searchParams.entries());
+  const filterType = queryParams[filterValue];
+  if (filterType) {
+    return decodeURIComponent(filterType.replace(/\+/g, ' '));
+  }
   return [];
 };
 
@@ -88,14 +113,10 @@ export default async function decorate(block) {
     });
   });
 
-  const roleDropdown = new Dropdown(
-    block.querySelector('.browse-card-dropdown'),
-    DEFAULT_OPTIONS.ROLE,
-    roleOptions.items,
-  );
+  const roleDropdown = new Dropdown(block.querySelector('.browse-card-dropdown'), defaultRoleLabel, roleOptions.items);
   const productDropdown = new Dropdown(
     block.querySelector('.browse-card-dropdown'),
-    DEFAULT_OPTIONS.PRODUCT,
+    defaultProductLabel,
     solutionsList,
   );
 
@@ -103,6 +124,10 @@ export default async function decorate(block) {
 
   const contentDiv = document.createElement('div');
   contentDiv.classList.add('browse-cards-block-content');
+
+  /* update Query Param from selected Dropdown */
+  const roleQueryParamValue = updateParamValues(DEFAULT_OPTIONS.ROLE.toLowerCase());
+  const productQueryParamValue = updateParamValues(DEFAULT_OPTIONS.PRODUCT.toLowerCase());
 
   const param = {
     contentType: contentType && contentType.split(','),
@@ -112,6 +137,16 @@ export default async function decorate(block) {
     sortCriteria,
     noOfResults,
   };
+
+  if (roleQueryParamValue.length > 0 && roleQueryParamValue[0] !== DEFAULT_OPTIONS.ROLE) {
+    param.role = [roleQueryParamValue];
+    roleDropdown.updateDropdownValue(roleQueryParamValue);
+  }
+
+  if (productQueryParamValue.length > 0 && productQueryParamValue[0] !== DEFAULT_OPTIONS.PRODUCT) {
+    param.product = [productQueryParamValue];
+    productDropdown.updateDropdownValue(productQueryParamValue);
+  }
 
   // Function to filter and organize results based on content types
   const filterResults = (data, contentTypesToFilter) => {
@@ -251,14 +286,18 @@ export default async function decorate(block) {
   }
 
   roleDropdown.handleOnChange((value) => {
-    const roleValue = value === DEFAULT_OPTIONS.ROLE ? [] : [value];
+    const roleValue = value === defaultRoleLabel ? [] : [value];
     param.role = roleValue;
+    /* Update the URL Query Param with Selected Role Value */
+    updateURLWithSelectedFilters(DEFAULT_OPTIONS.ROLE.toLowerCase(), value);
     fetchNewCards();
   });
 
   productDropdown.handleOnChange((value) => {
-    const productValue = value === DEFAULT_OPTIONS.PRODUCT ? [] : [value];
+    const productValue = value === defaultProductLabel ? [] : [value];
     param.product = productValue;
+    /* Update the URL Query Param with Selected Product Value */
+    updateURLWithSelectedFilters(DEFAULT_OPTIONS.PRODUCT.toLowerCase(), value);
     fetchNewCards();
   });
 

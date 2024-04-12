@@ -81,15 +81,14 @@ export default async function decorate(block) {
 
   if (signUpBtn) {
     signUpBtn.addEventListener('click', async () => {
-      window.adobeIMS.signIn();
+      window.adobeIMS.signUp();
     });
   }
 
-  const isUserSignedIn = await isSignedInUser();
-
-  // if not signed in or in UE edit mode
-  if (!isUserSignedIn || document.documentElement.classList.contains('adobe-ue-edit')) {
-    // show the block
-    block.style.display = 'block';
-  }
+  isSignedInUser().then((isUserSignedIn) => {
+    if (!isUserSignedIn || document.documentElement.classList.contains('adobe-ue-edit')) {
+      // show the block
+      block.style.display = 'block';
+    }
+  });
 }

@@ -16,13 +16,10 @@ import {
   getMetadata,
   loadScript,
   fetchPlaceholders,
+  readBlockConfig,
+  createOptimizedPicture,
 } from './lib-franklin.js';
 // eslint-disable-next-line import/no-cycle
-
-const ffetchModulePromise = import('./ffetch.js');
-
-// eslint-disable-next-line import/no-cycle
-const libAnalyticsModulePromise = import('./analytics/lib-analytics.js');
 
 const LCP_BLOCKS = ['marquee']; // add your LCP blocks to the list
 
@@ -171,8 +168,15 @@ export function isBrowsePage() {
  * add a section for the left rail when on a browse page.
  */
 function addBrowseRail(main) {
+  // if there is already editable browse rail stored
+  const browseRailSectionFound = [...main.querySelectorAll('.section-metadata')].find((sMeta) =>
+    readBlockConfig(sMeta)?.style.split(',').includes('browse-rail-section'),
+  );
+  if (browseRailSectionFound) return;
+
+  // default: create a dynamic uneditable browse rail
   const leftRailSection = document.createElement('div');
-  leftRailSection.classList.add('browse-rail', isBrowsePage());
+  leftRailSection.classList.add('browse-rail-section', isBrowsePage());
   leftRailSection.append(buildBlock('browse-rail', []));
   main.append(leftRailSection);
 }
@@ -261,6 +265,33 @@ export function decorateExternalLinks(main) {
 }
 
 /**
+ * Links that have urls with JSON the hash, the JSON will be translated to attributes
+ * eg <a href="https://example.com#{"target":"_blank", "auth-only": "true"}">link</a>
+ * will be translated to <a href="https://example.com" target="_blank" auth-only="true">link</a>
+ * @param {HTMLElement} block
+ */
+export const decorateLinks = (block) => {
+  const links = block.querySelectorAll('a');
+  links.forEach((link) => {
+    const decodedHref = decodeURIComponent(link.getAttribute('href'));
+    const firstCurlyIndex = decodedHref.indexOf('{');
+    const lastCurlyIndex = decodedHref.lastIndexOf('}');
+    if (firstCurlyIndex > -1 && lastCurlyIndex > -1) {
+      // everything between curly braces is treated as JSON string.
+      const optionsJsonStr = decodedHref.substring(firstCurlyIndex, lastCurlyIndex + 1);
+      const fixedJsonString = optionsJsonStr.replace(/'/g, '"'); // JSON.parse function expects JSON strings to be formatted with double quotes
+      const parsedJSON = JSON.parse(fixedJsonString);
+      Object.entries(parsedJSON).forEach(([key, value]) => {
+        link.setAttribute(key.trim(), value);
+      });
+      // remove the JSON string from the hash, if JSON string is the only thing in the hash, remove the hash as well.
+      const endIndex = decodedHref.charAt(firstCurlyIndex - 1) === '#' ? firstCurlyIndex - 1 : firstCurlyIndex;
+      link.href = decodedHref.substring(0, endIndex);
+    }
+  });
+};
+
+/**
  * Check if current page is a MD Docs Page.
  * theme = docs is set in bulk metadata for docs paths.
  * @param {string} type The type of doc page - example: docs-solution-landing,
@@ -310,13 +341,143 @@ export function decorateAnchors(main) {
   const anchorIcons = [...main.querySelectorAll(`.icon-headding-anchor`)];
   anchorIcons.forEach((icon) => {
     const slugNode = icon.nextSibling;
-    const slug = slugNode.textContent;
+    const slug = slugNode?.textContent?.trim();
     if (slug) {
       icon.parentElement.id = slug;
       icon.remove();
       slugNode.remove();
     }
   });
+}
+
+/**
+ * creates an element from html string
+ * @param {string} html
+ * @returns {HTMLElement}
+ */
+export function htmlToElement(html) {
+  const template = document.createElement('template');
+  const trimmedHtml = html.trim(); // Never return a text node of whitespace as the result
+  template.innerHTML = trimmedHtml;
+  return template.content.firstElementChild;
+}
+
+const encodeHTML = (str) => str.replace(/[\u00A0-\u9999<>&]/g, (i) => `&#${i.charCodeAt(0)};`);
+
+/**
+ * Parse attribute strings like: {color="red" class="highlight"} to object {color: "red", class: "highlight"}
+ * @param {string} attrs
+ * @returns
+ */
+const parseInlineAttributes = (attrs) => {
+  const result = {};
+  attrs
+    .split(/\s+(?=(?:[^"]*"[^"]*")*[^"]*$)/g) // match spaces only if not within quotes
+    .map((attr) => attr.split('='))
+    .forEach(([key, value]) => {
+      result[key] = value === undefined ? undefined : encodeHTML(value?.replace(/"/g, '') || '');
+    });
+  return result;
+};
+/**
+ * converts text with attributes to <span> elements with given attributes.
+ * eg: [text]{color="red" class="highlight"} => <span color="red" class="highlight">text</span>
+ * @param {*} inputStr
+ * @returns
+ */
+export const getDecoratedInlineHtml = (inputStr) => {
+  if (!inputStr) return inputStr;
+  const regex = /\[([^[\]]*)\]{([^}]+)}/g;
+  return inputStr.replace(regex, (match, text, attrs) => {
+    const encodedText = encodeHTML(text);
+    const attrsObj = parseInlineAttributes(attrs);
+    const validAttrs = Object.values(attrsObj).every((v) => v !== undefined);
+    if (!validAttrs) return match; // ignore expresssion that have attributes with undefined values
+    const newAttrs = Object.entries(attrsObj)
+      .map(([key, value]) => `${key}="${value}"`)
+      .join(' ');
+    return `<span ${newAttrs}>${encodedText}</span>`;
+  });
+};
+
+/**
+ *
+ * @param {Node} textNode
+ */
+export function decorateInlineText(textNode) {
+  const { textContent } = textNode;
+  if (textContent.includes('[') && textContent.includes(']{')) {
+    const span = document.createElement('span');
+    span.innerHTML = getDecoratedInlineHtml(textContent);
+    window.requestAnimationFrame(() => {
+      textNode.replaceWith(...span.childNodes);
+    });
+  }
+}
+
+/**
+ * decorates the previous image element with attributes defined in the textNode
+ * @param {Node} textNode
+ */
+export function decoratePreviousImage(textNode) {
+  // if previous element is image, and textNode contains { and }, decorate the image
+  const { previousSibling, textContent } = textNode;
+  if (textContent.startsWith('{') && textContent.includes('}')) {
+    const isPrecededByPicture = previousSibling?.tagName.toLowerCase() === 'picture';
+    const isPrecededByImg = previousSibling?.tagName.toLowerCase() === 'img';
+    let picture;
+    let img;
+    if (isPrecededByPicture) {
+      picture = previousSibling;
+      img = picture.querySelector('img');
+    } else if (isPrecededByImg) {
+      img = previousSibling;
+    } else return; // only decorate if preceded by picture or img
+
+    const attrsStr = textContent.substring(1, textContent.indexOf('}'));
+    textNode.textContent = textContent.substring(textContent.indexOf('}') + 1);
+    if (img.src === 'about:error') return; // do not decorate broken images
+    const attrsObj = parseInlineAttributes(attrsStr);
+    let newPicture = picture;
+    if (attrsObj.width) {
+      // author defined width
+      const { width } = attrsObj;
+      const isNumberWithNoUnit = /^\d+$/.test(width);
+      if (isNumberWithNoUnit) {
+        newPicture = createOptimizedPicture(img.src, img.alt, false, [
+          { media: '(min-width: 400px)', width },
+          { width },
+        ]);
+      }
+      // set width, if digits only, add px, else set as is
+      newPicture.style.width = isNumberWithNoUnit ? `${width}px` : width;
+      picture.replaceWith(newPicture);
+    }
+    if (attrsObj.modal) {
+      // modal
+      newPicture.addEventListener('click', () => {
+        // eslint-disable-next-line import/no-cycle
+        const promises = [loadCSS(`${window.hlx.codeBasePath}/styles/image-modal.css`), import('./image-modal.js')];
+        Promise.all(promises).then(([, mod]) => mod.default(newPicture.querySelector('img')));
+      });
+    }
+    if (img.hasAttribute('data-title')) {
+      newPicture?.querySelector('img')?.setAttribute('title', img?.getAttribute('data-title'));
+    }
+    Object.entries(attrsObj).forEach(([key, value]) => newPicture.setAttribute(key, value));
+  }
+}
+
+/**
+ * @param {HTMLElement} element
+ */
+export function decorateInlineAttributes(element) {
+  const walker = document.createTreeWalker(element, NodeFilter.SHOW_TEXT);
+  while (walker.nextNode()) {
+    const { currentNode } = walker;
+    decorateInlineText(currentNode);
+    decoratePreviousImage(currentNode);
+  }
 }
 
 /**
@@ -331,6 +492,7 @@ export function decorateMain(main) {
   }
   decorateAnchors(main); // must be run before decorateIcons
   decorateIcons(main);
+  decorateInlineAttributes(main);
   decorateExternalLinks(main);
   buildAutoBlocks(main);
   decorateSections(main);
@@ -366,6 +528,88 @@ async function loadEager(doc) {
 
 export const isHelixDomain = () => ['hlx.page', 'hlx.live'].some((sfx) => window.location.hostname.endsWith(sfx));
 
+/**
+ * get site config
+ */
+export function getConfig() {
+  if (window.exlm && window.exlm.config) {
+    return window.exlm.config;
+  }
+
+  const HOSTS = [
+    {
+      env: 'PROD',
+      cdn: 'experienceleague.adobe.com',
+      hlxPreview: 'main--exlm-prod--adobe-experience-league.hlx.page',
+      hlxLive: 'main--exlm-prod--adobe-experience-league.hlx.live',
+    },
+    {
+      env: 'STAGE',
+      cdn: 'experienceleague-stage.adobe.com',
+      hlxPreview: 'main--exlm-stage--adobe-experience-league.hlx.page',
+      hlxLive: 'main--exlm-stage--adobe-experience-league.live',
+    },
+    {
+      env: 'DEV',
+      cdn: 'experienceleague-dev.adobe.com',
+      hlxPreview: 'main--exlm--adobe-experience-league.hlx.page',
+      hlxLive: 'main--exlm--adobe-experience-league.hlx.live',
+    },
+  ];
+
+  const currentHost = window.location.hostname;
+  const defaultEnv = HOSTS.find((hostObj) => hostObj.env === 'DEV');
+  const currentEnv = HOSTS.find((hostObj) => Object.values(hostObj).includes(currentHost));
+  const cdnHost = currentEnv?.cdn || defaultEnv.cdn;
+  const cdnOrigin = `https://${cdnHost}`;
+  const lang = document.querySelector('html').lang || 'en';
+  const prodAssetsCdnOrigin = 'https://cdn.experienceleague.adobe.com';
+  const isProd = currentEnv?.env === 'PROD';
+  const isStage = currentEnv?.env === 'STAGE';
+  const ppsOrigin = isProd ? 'https://pps.adobe.io' : 'https://pps-stage.adobe.io';
+  const ims = {
+    client_id: 'ExperienceLeague',
+    environment: isProd ? 'prod' : 'stg1',
+    debug: !isProd,
+  };
+
+  let launchScriptSrc;
+  if (isProd) launchScriptSrc = 'https://assets.adobedtm.com/a7d65461e54e/6e9802a06173/launch-43baf8381f4b.min.js';
+  else if (isStage)
+    launchScriptSrc = 'https://assets.adobedtm.com/a7d65461e54e/6e9802a06173/launch-dbb3f007358e-staging.min.js';
+  else launchScriptSrc = 'https://assets.adobedtm.com/d4d114c60e50/9f881954c8dc/launch-caabfb728852-development.js';
+
+  window.exlm = window.exlm || {};
+  window.exlm.config = {
+    ims,
+    currentEnv,
+    cdnOrigin,
+    cdnHost,
+    prodAssetsCdnOrigin,
+    ppsOrigin,
+    launchScriptSrc,
+    khorosProfileUrl: `${cdnOrigin}/api/action/khoros/profile-menu-list`,
+    privacyScript: `${cdnOrigin}/etc.clientlibs/globalnav/clientlibs/base/privacy-standalone.js`,
+    profileUrl: `${cdnOrigin}/api/profile?lang=${lang}`,
+    JWTTokenUrl: `${cdnOrigin}/api/token?lang=${lang}`,
+    coveoTokenUrl: `${cdnOrigin}/api/coveo-token?lang=${lang}`,
+    coveoSearchResultsUrl: 'https://platform.cloud.coveo.com/rest/search/v2',
+    liveEventsUrl: `${prodAssetsCdnOrigin}/thumb/upcoming-events.json`,
+    adlsUrl: 'https://learning.adobe.com/catalog.result.json',
+    searchUrl: `${cdnOrigin}/search.html`,
+    articleUrl: `${cdnOrigin}/api/articles/`,
+    solutionsUrl: `${cdnOrigin}/api/solutions?page_size=100`,
+    pathsUrl: `${cdnOrigin}/api/paths`,
+    // Browse Left nav
+    browseMoreProductsLink: `/${lang}/browse`,
+    // Machine Translation
+    automaticTranslationLink: `/${lang}/docs/contributor/contributor-guide/localization/machine-translation`,
+    // Recommended Courses
+    recommendedCoursesUrl: `${cdnOrigin}/home?lang=${lang}#dashboard/learning`,
+  };
+  return window.exlm.config;
+}
+
 export const locales = new Map([
   ['de', 'de_DE'],
   ['en', 'en_US'],
@@ -374,21 +618,24 @@ export const locales = new Map([
   ['it', 'it_IT'],
   ['ja', 'ja_JP'],
   ['ko', 'ko_KO'],
-  ['pt-BR', 'pt_BR'],
-  ['zh-Hans', 'zh_HANS'],
+  ['pt-br', 'pt_BR'],
+  ['zh-hans', 'zh_HANS'],
+  ['zh-hant', 'zh_HANT'],
+  ['nl', 'nl_NL'],
+  ['sv', 'sv_SE'],
 ]);
 
 export async function loadIms() {
+  const { ims } = getConfig();
   window.imsLoaded =
     window.imsLoaded ||
     new Promise((resolve, reject) => {
       const timeout = setTimeout(() => reject(new Error('IMS timeout')), 5000);
       window.adobeid = {
-        client_id: isHelixDomain() ? 'ExperienceLeague_Dev' : 'ExperienceLeague',
         scope:
-          'AdobeID,additional_info.company,additional_info.ownerOrg,avatar,openid,read_organizations,read_pc,session,account_cluster.read',
+          'AdobeID,additional_info.company,additional_info.ownerOrg,avatar,openid,read_organizations,read_pc,session,account_cluster.read,pps.read',
         locale: locales.get(document.querySelector('html').lang) || locales.get('en'),
-        debug: false,
+        ...ims,
         onReady: () => {
           // eslint-disable-next-line no-console
           console.log('Adobe IMS Ready!');
@@ -402,32 +649,11 @@ export async function loadIms() {
   return window.imsLoaded;
 }
 
-/**
- * Loads everything that doesn't need to be delayed.
- * @param {Element} doc The container element
- */
-async function loadLazy(doc) {
-  const main = doc.querySelector('main');
-  await loadBlocks(main);
-  loadIms(); // start it early, asyncronously
+const loadMartech = async (headerPromise, footerPromise) => {
+  const { privacyScript, launchScriptSrc } = getConfig();
+  oneTrust();
 
-  const { hash } = window.location;
-  const element = hash ? doc.getElementById(hash.substring(1)) : false;
-  const { lang } = getPathDetails();
-  if (hash && element) element.scrollIntoView();
-  const headerPromise = loadHeader(doc.querySelector('header'));
-  const footerPromise = loadFooter(doc.querySelector('footer'));
-
-  let launchScriptSrc = '';
-  if (window.location.host === 'eds-stage.experienceleague.adobe.com') {
-    launchScriptSrc = 'https://assets.adobedtm.com/a7d65461e54e/6e9802a06173/launch-dbb3f007358e-staging.min.js';
-  } else if (window.location.host === 'experienceleague.adobe.com') {
-    launchScriptSrc = 'https://assets.adobedtm.com/a7d65461e54e/6e9802a06173/launch-43baf8381f4b.min.js';
-  } else {
-    launchScriptSrc = 'https://assets.adobedtm.com/a7d65461e54e/6e9802a06173/launch-e6bd665acc0a-development.min.js';
-  }
-
-  const oneTrustPromise = loadScript(`/scripts/analytics/privacy-standalone.js`, {
+  const oneTrustPromise = loadScript(privacyScript, {
     async: true,
     defer: true,
   });
@@ -436,11 +662,14 @@ async function loadLazy(doc) {
     async: true,
   });
 
-  Promise.all([launchPromise, libAnalyticsModulePromise, headerPromise, footerPromise, oneTrustPromise]).then(
+  // eslint-disable-next-line import/no-cycle
+  const libAnalyticsPromise = import('./analytics/lib-analytics.js');
+
+  Promise.all([launchPromise, libAnalyticsPromise, headerPromise, footerPromise, oneTrustPromise]).then(
     // eslint-disable-next-line no-unused-vars
     ([launch, libAnalyticsModule, headPr, footPr]) => {
+      const { lang } = getPathDetails();
       const { pageLoadModel, linkClickModel, pageName } = libAnalyticsModule;
-      oneTrust();
       document.querySelector('[href="#onetrust"]').addEventListener('click', (e) => {
         e.preventDefault();
         window.adobePrivacy.showConsentPopup();
@@ -464,10 +693,26 @@ async function loadLazy(doc) {
       });
     },
   );
+};
 
+/**
+ * Loads everything that doesn't need to be delayed.
+ * @param {Element} doc The container element
+ */
+async function loadLazy(doc) {
+  const main = doc.querySelector('main');
+  await loadBlocks(main);
+  loadIms(); // start it early, asyncronously
+
+  const { hash } = window.location;
+  const element = hash ? doc.getElementById(hash.substring(1)) : false;
+  if (hash && element) element.scrollIntoView();
+  const headerPromise = loadHeader(doc.querySelector('header'));
+  const footerPromise = loadFooter(doc.querySelector('footer'));
+  // disable martech if martech=off is in the query string, this is used for testing ONLY
+  if (window.location.search?.indexOf('martech=off') === -1) loadMartech(headerPromise, footerPromise);
   loadCSS(`${window.hlx.codeBasePath}/styles/lazy-styles.css`);
   loadFonts();
-
   sampleRUM('lazy');
 }
 
@@ -491,18 +736,6 @@ export function createTag(tag, attributes, html) {
     });
   }
   return el;
-}
-
-/**
- * creates an element from html string
- * @param {string} html
- * @returns {HTMLElement}
- */
-export function htmlToElement(html) {
-  const template = document.createElement('template');
-  const trimmedHtml = html.trim(); // Never return a text node of whitespace as the result
-  template.innerHTML = trimmedHtml;
-  return template.content.firstElementChild;
 }
 
 /**
@@ -536,8 +769,6 @@ function loadDelayed() {
   // load anything that can be postponed to the latest here
   // eslint-disable-next-line import/no-cycle
   addMetaTagsToWindow();
-  // eslint-disable-next-line import/no-cycle
-  if (isDocArticlePage()) window.setTimeout(() => import('./feedback/feedback.js'), 3000);
 }
 
 /**
@@ -601,6 +832,19 @@ export function rewriteDocsPath(docsPath) {
   return url.toString().replace(PROD_BASE, ''); // always remove PROD_BASE if exists
 }
 
+export async function fetchWithFallback(path, fallbackPath) {
+  const response = await fetch(path);
+  if (response.ok) return response;
+  return fetch(fallbackPath);
+}
+
+export async function fetchFragment(rePath, lang = 'en') {
+  const path = `/fragments/${lang}/${rePath}.plain.html`;
+  const fallback = `/fragments/en/${rePath}.plain.html`;
+  const response = await fetchWithFallback(path, fallback);
+  return response.text();
+}
+
 export async function fetchLanguagePlaceholders() {
   const { lang } = getPathDetails();
   try {
@@ -621,12 +865,25 @@ export async function fetchLanguagePlaceholders() {
 }
 
 export async function getLanguageCode() {
-  const { lang } = getPathDetails();
-  const ffetch = (await ffetchModulePromise).default;
-  const langMap = await ffetch(`/languages.json`).all();
-  const langObj = langMap.find((item) => item.key === lang);
-  const langCode = langObj ? langObj.value : lang;
-  return langCode;
+  if (window.languageCode) return window.languageCode;
+  window.languageCode = new Promise((resolve, reject) => {
+    const { lang } = getPathDetails();
+    fetch('/languages.json')
+      .then((response) => response.json())
+      .then((languages) => {
+        const langMap = languages.data;
+        const langObj = langMap.find((item) => item.key === lang);
+        const langCode = langObj ? langObj.value : lang;
+        window.languageCode = langCode;
+        resolve(langCode);
+      })
+      .catch((error) => {
+        // eslint-disable-next-line no-console
+        console.error('Error fetching language code:', error);
+        reject(error);
+      });
+  });
+  return window.languageCode;
 }
 
 async function loadDefaultModule(jsPath) {
@@ -639,7 +896,49 @@ async function loadDefaultModule(jsPath) {
   }
 }
 
+/**
+ * THIS IS TEMPORARY FOR SUMMIT
+ */
+function handleHomePageHashes() {
+  // home page AND #feedback hash
+  const { pathname, search = '', hash = '' } = window.location;
+  if (pathname === '/') {
+    if (hash === '#feedback' || hash === '#dashboard/profile') {
+      window.location.href = `/home${search}${hash}`;
+      return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * @param {string} placeholderKey
+ * @param {string} fallbackText
+ * @returns
+ */
+export function createPlaceholderSpan(placeholderKey, fallbackText, onResolved) {
+  const span = document.createElement('span');
+  span.setAttribute('data-placeholder', placeholderKey);
+  span.setAttribute('data-placeholder-fallback', fallbackText);
+  span.style.setProperty('--placeholder-width', `${fallbackText.length}ch`);
+  fetchLanguagePlaceholders()
+    .then((placeholders) => {
+      span.textContent = placeholders[placeholderKey] || fallbackText;
+      span.removeAttribute('data-placeholder');
+      span.removeAttribute('data-placeholder-fallback');
+      span.style.removeProperty('--placeholder-width');
+      if (onResolved) onResolved(span);
+    })
+    .catch(() => {
+      span.textContent = fallbackText;
+    });
+  return span;
+}
+
 async function loadPage() {
+  // THIS IS TEMPORARY FOR SUMMIT.
+  if (handleHomePageHashes()) return;
+  // END OF TEMPORARY FOR SUMMIT.
   await loadEager(document);
   await loadLazy(document);
   loadRails();

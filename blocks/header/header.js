@@ -1,13 +1,41 @@
 import { isSignedInUser } from '../../scripts/data-service/profile-service.js';
-import { decorateIcons } from '../../scripts/lib-franklin.js';
-import { htmlToElement, getPathDetails, fetchLanguagePlaceholders } from '../../scripts/scripts.js';
+import { decorateIcons, loadCSS, getMetadata } from '../../scripts/lib-franklin.js';
+import {
+  htmlToElement,
+  getPathDetails,
+  fetchLanguagePlaceholders,
+  decorateLinks,
+  getConfig,
+  getLink,
+  fetchFragment,
+} from '../../scripts/scripts.js';
+import { getProducts } from '../browse-rail/browse-rail.js';
 
 const languageModule = import('../../scripts/language.js');
 const authOperationsModule = import('../../scripts/auth/auth-operations.js');
-const searchModule = import('../../scripts/search/search.js');
-// Khoros Proxy URL (Determine the environment based on the host name)
-const environment = window.location.hostname === 'experienceleague.adobe.com' ? '' : '-dev';
-export const khorosProxyProfileAPI = `https://51837-exlmconverter${environment}.adobeioruntime.net/api/v1/web/main/khoros/plugins/custom/adobe/adobedx/profile-menu-list`;
+const { khorosProfileUrl, ppsOrigin, ims } = getConfig();
+
+let searchElementPromise = null;
+
+export async function loadSearchElement() {
+  searchElementPromise =
+    searchElementPromise ??
+    new Promise((resolve, reject) => {
+      // eslint-disable-next-line
+      Promise.all([
+        import('../../scripts/search/search.js'),
+        loadCSS(`${window.hlx.codeBasePath}/scripts/search/search.css`),
+      ])
+        .then((results) => {
+          const [mod] = results;
+          resolve(mod.default ?? mod);
+        })
+        .catch((e) => {
+          reject(e);
+        });
+    });
+  return searchElementPromise;
+}
 
 class Deferred {
   constructor() {
@@ -95,7 +123,7 @@ const communityLocalesMap = new Map([
 async function fetchCommunityProfileData() {
   const locale = communityLocalesMap.get(document.querySelector('html').lang) || communityLocalesMap.get('en');
   try {
-    const response = await fetch(`${khorosProxyProfileAPI}?lang=${locale}`, {
+    const response = await fetch(`${khorosProfileUrl}?lang=${locale}`, {
       method: 'GET',
       headers: {
         'x-ims-token': await window.adobeIMS?.getAccessToken().token,
@@ -153,11 +181,6 @@ const randomId = (length = 6) =>
  */
 const getCell = (block, row, cell) => block.querySelector(`:scope > div:nth-child(${row}) > div:nth-child(${cell})`);
 
-// fetch fragment html
-const fetchFragment = async (rePath, lang = 'en') => {
-  const response = await fetch(`/fragments/${lang}/${rePath}.plain.html`);
-  return response.text();
-};
 // Mobile Only (Until 1024px)
 const isMobile = () => window.matchMedia('(max-width: 1023px)').matches;
 
@@ -396,6 +419,26 @@ const navDecorator = async (navBlock) => {
 
   navBlock.firstChild.id = hamburger.getAttribute('aria-controls');
   navBlock.prepend(hamburger);
+
+  // Featured Product List added in Top Products Page
+  const productList = await getProducts();
+
+  [...navBlock.querySelectorAll('.nav-item')].forEach((navItemEl) => {
+    if (navItemEl.querySelector(':scope > a[featured-products]')) {
+      const featuredProductLi = navBlock.querySelector('li.nav-item a[featured-products]');
+      // Remove the <li> element from the DOM
+      featuredProductLi.remove();
+      productList.forEach((item) => {
+        if (item.featured) {
+          const newLi = document.createElement('li');
+          newLi.className = 'nav-item nav-item-leaf';
+          newLi.innerHTML = `<a href="${getLink(item.path)}">${item.title}</a>`;
+          navItemEl.parentNode.appendChild(newLi);
+        }
+      });
+    }
+  });
+
   const isSignedIn = await isSignedInUser();
   if (!isSignedIn) {
     // hide auth-only nav items - see decorateLinks method for details
@@ -469,36 +512,19 @@ const searchDecorator = async (searchBlock) => {
     </div>
   `,
   );
+
+  const Search = await loadSearchElement();
   searchBlock.append(searchWrapper);
+
+  const searchItem = new Search({ searchBlock });
+  searchItem.configureAutoComplete({
+    searchOptions: options,
+    showSearchSuggestions: true,
+  });
+
   await decorateIcons(searchBlock);
 
-  const prepareSearch = async () => {
-    const Search = (await searchModule).default;
-    const searchItem = new Search({ searchBlock });
-    searchItem.configureAutoComplete({
-      searchOptions: options,
-      showSearchSuggestions: false,
-    });
-  };
-  prepareSearch();
-
   return searchBlock;
-};
-
-/**
- * Decorates the sign-up block
- * @param {HTMLElement} signUpBlock
- */
-const signUpDecorator = async (signUpBlock) => {
-  simplifySingleCellBlock(signUpBlock);
-  const isSignedIn = await isSignedInUser();
-  if (isSignedIn) {
-    signUpBlock.style.display = 'none';
-  } else {
-    signUpBlock.firstChild.addEventListener('click', async () => {
-      window.adobeIMS.signUp();
-    });
-  }
 };
 
 /**
@@ -512,7 +538,7 @@ const languageDecorator = async (languageBlock) => {
 
   const prependLanguagePopover = async (parent) => {
     await languageModule.then(({ buildLanguagePopover }) => {
-      buildLanguagePopover().then(({ popover, languages }) => {
+      buildLanguagePopover(null, 'language-picker-popover-header').then(({ popover, languages }) => {
         decoratorState.languages.resolve(languages);
         parent.append(popover);
       });
@@ -520,7 +546,7 @@ const languageDecorator = async (languageBlock) => {
   };
 
   const languageHtml = `
-      <button type="button" class="language-selector-button" aria-haspopup="true" aria-controls="language-picker-popover" aria-label="${title}">
+      <button type="button" class="language-selector-button" aria-haspopup="true" aria-controls="language-picker-popover-header" aria-label="${title}">
         <span class="icon icon-globegrid"></span>
       </button>
     `;
@@ -529,6 +555,17 @@ const languageDecorator = async (languageBlock) => {
   prependLanguagePopover(languageBlock);
   return languageBlock;
 };
+
+async function getPPSProfile(accessToken, accountId) {
+  const res = await fetch(`${ppsOrigin}/api/profile`, {
+    headers: {
+      'X-Api-Key': ims.client_id,
+      'X-Account-Id': accountId,
+      Authorization: `Bearer ${accessToken}`,
+    },
+  });
+  return res.json();
+}
 
 /**
  * Decorates the sign-in block
@@ -540,17 +577,33 @@ const signInDecorator = async (signInBlock) => {
   const isSignedIn = await isSignedInUser();
   if (isSignedIn) {
     signInBlock.classList.add('signed-in');
-    signInBlock.replaceChildren(
-      htmlToElement(
-        `<div class="profile">
-          <button class="profile-toggle" aria-controls="profile-menu">
-            <span class="icon icon-profile"></span>
-          </button>
-          <div class="profile-menu" id="profile-menu">
-          </div>
-        </div>`,
-      ),
+    const profile = htmlToElement(
+      `<div class="profile">
+        <button class="profile-toggle" aria-controls="profile-menu">
+          <span class="icon icon-profile"></span>
+        </button>
+        <div class="profile-menu" id="profile-menu">
+        </div>
+      </div>`,
     );
+
+    signInBlock.replaceChildren(profile);
+    const { token } = window.adobeIMS.getAccessToken();
+    const accountId = (await window.adobeIMS.getProfile()).userId;
+    getPPSProfile(token, accountId)
+      .then((ppsProfile) => {
+        const profilePicture = ppsProfile?.images['50'];
+        if (profilePicture) {
+          const profileToggle = profile.querySelector('.profile-toggle');
+          profileToggle.replaceChildren(
+            htmlToElement(`<img class="profile-picture" src="${profilePicture}" alt="profile picture" />`),
+          );
+        }
+      })
+      .catch((err) => {
+        // eslint-disable-next-line no-console
+        console.error(err);
+      });
 
     const toggler = signInBlock.querySelector('.profile-toggle');
     const navOverlay = document.querySelector('.nav-overlay');
@@ -622,14 +675,11 @@ const productGridDecorator = async (productGridBlock) => {
     productGridBlock.classList.add('signed-in');
     const productDropdown = document.createElement('div');
     productDropdown.classList.add('product-dropdown');
-    const pTags = productGridBlock.querySelectorAll('p');
-    if (pTags.length > 0) {
-      pTags.forEach((p) => {
-        const anchor = p.querySelector('a');
-        anchor.setAttribute('target', '_blank');
-        const href = anchor.getAttribute('href').split('#');
-        anchor.setAttribute('href', href[0]);
-        productDropdown.innerHTML += p.innerHTML;
+    const aTags = productGridBlock.querySelectorAll('a');
+    if (aTags.length > 0) {
+      aTags.forEach((a) => {
+        a.setAttribute('target', '_blank');
+        productDropdown.append(a);
       });
     }
     const productToggle = document.createElement('button');
@@ -651,10 +701,7 @@ const productGridDecorator = async (productGridBlock) => {
     };
 
     registerHeaderResizeHandler(() => {
-      if (isMobile()) {
-        // if mobile, hide product grid block
-        gridToggler.style.display = 'none';
-      } else {
+      if (!isMobile()) {
         // if desktop, add mouseenter/mouseleave, remove click event
         gridToggler.parentElement.addEventListener('mouseenter', toggleExpandGridContent);
         gridToggler.parentElement.addEventListener('mouseleave', toggleExpandGridContent);
@@ -747,35 +794,17 @@ const decorateNewTabLinks = (block) => {
 };
 
 /**
- * Links that have urls with JSON the hash, the JSON will be translated to attributes
- * eg <a href="https://example.com#{"target":"_blank", "auth-only": "true"}">link</a>
- * will be translated to <a href="https://example.com" target="_blank" auth-only="true">link</a>
- * @param {HTMLElement} block
- */
-const decorateLinks = (block) => {
-  const links = block.querySelectorAll('a');
-  links.forEach((link) => {
-    const decodedHref = decodeURIComponent(link.getAttribute('href'));
-    const firstCurlyIndex = decodedHref.indexOf('{');
-    const lastCurlyIndex = decodedHref.lastIndexOf('}');
-    if (firstCurlyIndex > -1 && lastCurlyIndex > -1) {
-      // everything between curly braces is treated as JSON string.
-      const optionsJsonStr = decodedHref.substring(firstCurlyIndex, lastCurlyIndex + 1);
-      Object.entries(JSON.parse(optionsJsonStr)).forEach(([key, value]) => {
-        link.setAttribute(key.trim(), value);
-      });
-      // remove the JSON string from the hash, if JSON string is the only thing in the hash, remove the hash as well.
-      const endIndex = decodedHref.charAt(firstCurlyIndex - 1) === '#' ? firstCurlyIndex - 1 : firstCurlyIndex;
-      link.href = decodedHref.substring(0, endIndex);
-    }
-  });
-};
-/**
  * Main header decorator, calls all the other decorators
  * @param {HTMLElement} headerBlock
  */
 export default async function decorate(headerBlock) {
   headerBlock.style.display = 'none';
+  loadSearchElement();
+  const [solutionTag] = getMetadata('solution').trim().split(',');
+  if (solutionTag) {
+    window.headlessSolutionProductKey = solutionTag;
+  }
+
   // eslint-disable-next-line no-unused-vars
   headerBlock.innerHTML = await headerFragment;
 
@@ -799,7 +828,6 @@ export default async function decorate(headerBlock) {
 
   decorateHeaderBlock('brand', brandDecorator);
   decorateHeaderBlock('search', searchDecorator);
-  decorateHeaderBlock('sign-up', signUpDecorator);
   decorateHeaderBlock('language-selector', languageDecorator);
   decorateHeaderBlock('product-grid', productGridDecorator);
   decorateHeaderBlock('sign-in', signInDecorator);

@@ -191,7 +191,7 @@ const ICONS_CACHE = {};
  * Replace icons with inline SVG and prefix with codeBasePath.
  * @param {Element} [element] Element containing icons
  */
-export async function decorateIcons(element) {
+export async function decorateIcons(element, prefix = '') {
   // Prepare the inline sprite
   let svgSprite = document.getElementById('franklin-svg-sprite');
   if (!svgSprite) {
@@ -211,7 +211,7 @@ export async function decorateIcons(element) {
       if (!ICONS_CACHE[iconName]) {
         ICONS_CACHE[iconName] = true;
         try {
-          const response = await fetch(`${window.hlx.codeBasePath}/icons/${iconName}.svg`);
+          const response = await fetch(`${window.hlx.codeBasePath}/icons/${prefix}${iconName}.svg`);
           if (!response.ok) {
             ICONS_CACHE[iconName] = false;
             return;
@@ -721,7 +721,12 @@ export function setup() {
   const scriptEl = document.querySelector('script[src$="/scripts/scripts.js"]');
   if (scriptEl) {
     try {
-      [window.hlx.codeBasePath] = new URL(scriptEl.src).pathname.split('/scripts/scripts.js');
+      const scriptURL = new URL(scriptEl.src, window.location);
+      if (scriptURL.host === window.location.host) {
+        [window.hlx.codeBasePath] = scriptURL.pathname.split('/scripts/scripts.js');
+      } else {
+        [window.hlx.codeBasePath] = scriptURL.href.split('/scripts/scripts.js');
+      }
     } catch (error) {
       // eslint-disable-next-line no-console
       console.log(error);

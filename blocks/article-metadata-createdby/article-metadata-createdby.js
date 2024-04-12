@@ -1,4 +1,8 @@
+/**
+ * @param {HTMLElement} block
+ */
 export default function decorate(block) {
-  const kids = block.querySelector(':scope > div > div').innerHTML;
-  if (kids) block.innerHTML = kids;
+  if (!block.textContent.trim()) {
+    block.remove(); // causes CLS issues
+  }
 }

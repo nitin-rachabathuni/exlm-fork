@@ -1,14 +1,30 @@
 import { decorateIcons, getMetadata, loadCSS } from '../lib-franklin.js';
-import { createTag, htmlToElement, fetchLanguagePlaceholders, getPathDetails } from '../scripts.js'; // eslint-disable-line import/no-cycle
-import { QUALTRICS_LOADED_EVENT_NAME } from './qualtrics/constants.js';
-import { embedQualtricsSurveyIntercept } from './qualtrics/qualtrics-embed.js';
+// eslint-disable-next-line import/no-cycle
+import {
+  createTag,
+  htmlToElement,
+  getPathDetails,
+  fetchLanguagePlaceholders,
+  isDocArticlePage,
+  fetchFragment,
+} from '../scripts.js';
 import { assetInteractionModel } from '../analytics/lib-analytics.js';
+import { sendNotice } from '../toast/toast.js';
 
-// fetch fragment html
-const fetchFragment = async (rePath, lang = 'en') => {
-  const response = await fetch(`/fragments/${lang}/${rePath}.plain.html`);
-  return response.text();
-};
+let placeholders = {};
+try {
+  placeholders = await fetchLanguagePlaceholders();
+} catch (err) {
+  // eslint-disable-next-line no-console
+  console.error('Error fetching placeholders:', err);
+}
+
+const RETRY_LIMIT = 5;
+const RETRY_DELAY = 500;
+
+const FEEDBACK_CONTAINER_SELECTOR = '.feedback-ui';
+const FEEDBACK_SUCCESS = placeholders?.feedbackSuccess || 'Received! Thank you for your feedback.';
+const FEEDBACK_TEXT_ACTIVE = placeholders?.feedbackTextActive || 'Type your detailed feedback here and submit.';
 
 const { lang } = getPathDetails();
 const feedbackFragment = await fetchFragment('feedback-bar/feedback-bar', lang);
@@ -69,7 +85,7 @@ function decorateFirstQuestion(firstQuestion) {
 
 function decorateSecondQuestion(secondQuestion) {
   const initialPlaceholder = secondQuestion.querySelector('div:nth-child(1) > div:last-child').textContent.trim();
-  const updatedPlaceholder = secondQuestion.querySelector('div:nth-child(1) > div:first-child').textContent.trim();
+  const updatedPlaceholder = FEEDBACK_TEXT_ACTIVE;
   const submitText = secondQuestion
     .querySelector('div:nth-child(2) > div:nth-child(1) > p:first-child')
     .textContent.trim();
@@ -188,7 +204,7 @@ function decorateOpenedCtrl(openedControl) {
 }
 
 function hideFeedbackBar(state = true) {
-  document.querySelector('.feedback-ui').setAttribute('aria-hidden', state);
+  document.querySelector(FEEDBACK_CONTAINER_SELECTOR).setAttribute('aria-hidden', state);
 }
 
 function toggleFeedbackBar(el, show = false) {
@@ -299,7 +315,7 @@ function handleGithubBtns(el) {
 }
 
 function handleIntersection(entries) {
-  const fb = document.querySelector('.feedback-ui');
+  const fb = document.querySelector(FEEDBACK_CONTAINER_SELECTOR);
 
   entries.forEach((entry) => {
     if (entry.isIntersecting) {
@@ -348,16 +364,17 @@ function handleFeedbackIcons(el) {
   const textArea = moreQuestion.querySelector('.more-question > textarea');
   const title = el.querySelector('.first-question > h3');
 
-  [...feedbackIcon].forEach((icon) => {
+  [...feedbackIcon].forEach((icon, iconIndex) => {
     icon.addEventListener('click', () => {
       const textarea = el.querySelector('.more-question > textarea');
       textarea.disabled = false;
       toggleFeedbackBar(el, true);
       firstQuestionElement.classList.add('answered');
-      const iconVariation = icon.getAttribute('aria-label').replace(/(^\w|\s\w)/g, (m) => m.toUpperCase());
-      const qualtricsIcon = el.querySelector(`.QSI__EmbeddedFeedbackContainer_SVGButton[title="${iconVariation}"]`);
+      // find the real qualtrics icon to click, based on index.
+      const qualtricsIcons = [...el.querySelectorAll(`.QSI__EmbeddedFeedbackContainer_SVGButton`)];
+      const qualtricsIcon = qualtricsIcons.length > iconIndex && qualtricsIcons[iconIndex];
 
-      if (qualtricsIcon && icon) {
+      if (qualtricsIcon) {
         qualtricsIcon.click();
 
         if (textArea) {
@@ -408,6 +425,7 @@ function handleFeedbackSubmit(el) {
         const { surveyCompletedText } = firstQuestionElement.dataset;
         const surveyCompletedElement = createTag('p', { class: 'subtitle' }, surveyCompletedText);
         firstQuestionElement.insertAdjacentElement('afterend', surveyCompletedElement);
+        sendNotice(FEEDBACK_SUCCESS);
       }, 300);
     } else {
       console.log('Qualtrics text feedback malformed.'); // eslint-disable-line no-console
@@ -417,9 +435,37 @@ function handleFeedbackSubmit(el) {
   });
 }
 
-export default async function loadFeedbackUi() {
-  const placeholders = await fetchLanguagePlaceholders();
+export function feedbackError() {
+  const fb = document.querySelector(FEEDBACK_CONTAINER_SELECTOR);
+  // eslint-disable-next-line no-console
+  console.error("Couldn't embed Qualtrics survey intercept.");
+  showQualtricsLoadingError(fb);
+  toggleFeedbackBar(fb, false);
+}
 
+let checkInterval;
+let retryCount = 0;
+
+function checkInterceptLoaded() {
+  const fb = document.querySelector(FEEDBACK_CONTAINER_SELECTOR);
+
+  if (fb.querySelector(' .QSI__EmbeddedFeedbackContainer_Thumbs')) {
+    clearInterval(checkInterval);
+    handleFeedbackIcons(fb);
+    handleFeedbackSubmit(fb);
+  } else if (retryCount < RETRY_LIMIT) {
+    retryCount += 1;
+
+    if (!checkInterval) {
+      checkInterval = setInterval(checkInterceptLoaded, RETRY_DELAY);
+    }
+  } else {
+    clearInterval(checkInterval);
+    feedbackError();
+  }
+}
+
+export default async function loadFeedbackUi() {
   if (!showFeedbackBar()) return;
 
   loadCSS(`${window.hlx.codeBasePath}/scripts/feedback/feedback.css`);
@@ -436,25 +482,7 @@ export default async function loadFeedbackUi() {
   handleGithubBtns(fb);
   handleFeedbackBarVisibilityOnScroll();
 
-  try {
-    embedQualtricsSurveyIntercept(placeholders.feedbackSurveyId);
-  } catch (err) {
-    // eslint-disable-next-line no-console
-    console.error("Couldn't embed Qualtrics survey intercept.", err);
-    showQualtricsLoadingError(fb);
-    toggleFeedbackBar(fb, false);
-  }
-
-  function interceptLoaded() {
-    // wait for Qualtrics to load
-    // eslint-disable-next-line no-undef
-    if (QSI.API) {
-      handleFeedbackIcons(fb);
-      handleFeedbackSubmit(fb);
-    }
-  }
-
-  window.addEventListener(QUALTRICS_LOADED_EVENT_NAME, interceptLoaded, false);
+  window.addEventListener('qsi_js_loaded', checkInterceptLoaded, false);
 }
 
-loadFeedbackUi();
+if (isDocArticlePage()) loadFeedbackUi();
